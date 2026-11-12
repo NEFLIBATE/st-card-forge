@@ -1,0 +1,12 @@
+{
+  "name": "st-card-forge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "SillyTavern 中文角色卡生成、编辑和导出扩展",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "check": "node --check index.js && node --check core.js && node --check png.js"
+  },
+  "license": "MIT"
+}
