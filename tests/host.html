@@ -6,7 +6,10 @@
 <link rel="stylesheet" href="../style.css">
 <style>body { background:#15191a;color:#ddd;font:16px system-ui; } #extensions_settings2 { max-width:360px; }</style>
 <div id="extensions_settings2"></div><div id="extensionsMenu"></div>
+<div id="chat"><div class="mes" mesid="0"><div class="mes_text">测试聊天</div></div></div><textarea id="send_textarea" aria-label="聊天输入框"></textarea>
 <script>
+window.fixtureEvents = {};
+window.fire = key => (window.fixtureEvents[key] || []).forEach(fn => fn());
 window.requests = [];
 window.fixtureCard = {
     spec: 'chara_card_v2', spec_version: '2.0', data: {
@@ -23,6 +26,10 @@ window.ctx = {
     extensionSettings: JSON.parse(localStorage.getItem('fixture-settings') || '{}'),
     saveSettingsDebounced() { localStorage.setItem('fixture-settings', JSON.stringify(this.extensionSettings)); },
     mainApi: 'openai', name1: '旅人',
+    characters: [], characterId: 0, chatId: 'fixture-chat', chat: [], chatMetadata: {},
+    eventTypes: Object.fromEntries(['CHAT_CHANGED','CHARACTER_MESSAGE_RENDERED','MESSAGE_UPDATED','MESSAGE_SWIPED','MESSAGE_DELETED','GENERATION_ENDED'].map(key=>[key,key])),
+    eventSource: { on(key,fn) { (window.fixtureEvents[key] ||= []).push(fn); } },
+    async saveMetadata() { if (window.failMetadata) throw new Error('任务保存失败'); window.savedMetadata = JSON.parse(JSON.stringify(this.chatMetadata)); },
     powerUserSettings: { personas: { 'traveler.png': '远方旅人' }, persona_description: '当前玩家喜欢旧书。', persona_descriptions: { 'traveler.png': { description: '来自北方、携带破损地图的旅人。' } } },
     getPresetManager() { return { getSelectedPresetName: () => 'Default' }; },
     async generateRaw(params) {
@@ -30,6 +37,7 @@ window.ctx = {
     if (params.prompt.includes('{{') || params.systemPrompt.includes('{{')) throw new Error('fixture: unprotected SillyTavern macro');
         if (window.deferRequest) await new Promise(resolve => { window.releaseRequest = resolve; });
         if (window.nextRaw !== undefined) { const text = window.nextRaw; delete window.nextRaw; return text; }
+        if (params.prompt.includes('设计前端面板配置')) return JSON.stringify(window.fixtureFrontend);
         if (params.prompt.includes('只重写 first_mes')) return JSON.stringify({ first_mes: '“北方的旅人，请把地图放在灯下。”' });
         return '```json\n' + JSON.stringify(window.fixtureCard) + '\n```';
     },
