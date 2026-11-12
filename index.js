@@ -1,12 +1,8 @@
-import { VERSION, TEXT_FIELDS, emptyCard, normalizeCard, normalizeBook, parseModelJson, validateCard, buildPrompt, fileName } from './core.js';
+import { VERSION, TEXT_FIELDS, DEFAULT_BRIEF, DETAIL_SECTIONS, GENRES, generationOptions, emptyCard, normalizeCard, normalizeBook, parseModelJson, validateCard, buildPrompt, fileName } from './core.js';
 import { embedCard, extractCard } from './png.js';
 
 const KEY = 'st_card_forge';
 const MAX_FILE = 20 * 1024 * 1024;
-const DEFAULT_BRIEF = {
-    idea: '', name: '', genre: '自由创作', language: '简体中文', style: '细腻沉浸', detail: '标准',
-    relationship: '', requirements: '', persona: 'none', worldbook: false, responseLength: 4096,
-};
 let dialog, root, settings, card = emptyCard(), avatarData = '', rawOutput = '', activeTab = 'brief';
 let busy = false, discardGeneration = false, chatBusy = false, lastFocus, saveTimer;
 let importReceipt = '';
@@ -44,7 +40,27 @@ function persist() {
 }
 function scheduleSave() {
     clearTimeout(saveTimer);
+    updateDetailCounts(); syncGenerationOptions();
     saveTimer = setTimeout(persist, 450);
+}
+function updateDetailCounts() {
+    let total = 0;
+    for (const section of DETAIL_SECTIONS) {
+        const filled = section.fields.filter(f => $(`[data-brief="${f.key}"]`)?.value.trim()).length;
+        total += filled;
+        const badge = $(`[data-detail-count="${section.id}"]`);
+        if (badge) badge.textContent = `${filled}/${section.fields.length}`;
+    }
+    const counter = $('#cf-detail-total');
+    if (counter) counter.textContent = `已填写 ${total} / ${DETAIL_SECTIONS.reduce((sum, s) => sum + s.fields.length, 0)} 项细节`;
+}
+function syncGenerationOptions() {
+    const world = $('[data-brief="worldbook"]');
+    const count = $('[data-brief="worldbookCount"]');
+    if (!world || !count) return;
+    count.disabled = busy || !world.checked;
+    const options = generationOptions(getBrief());
+    $('#cf-output-plan').textContent = `1 条主开场 · ${options.greetings} 条备选开场 · ${options.dialogues} 组对白${world.checked ? ` · ${options.worldEntries} 条世界书` : ''}`;
 }
 function loadCard(next) {
     card = normalizeCard(next);
@@ -131,6 +147,7 @@ function setBusy(value, operation = 'generation') {
     $('#cf-discard').disabled = false;
     $('#cf-generate').textContent = value ? operation === 'generation' ? '正在生成…' : '正在导入…' : '✦ 生成角色卡';
     root.setAttribute('aria-busy', String(value));
+    syncGenerationOptions();
 }
 async function generate(field = '') {
     if (busy) return;
@@ -355,21 +372,45 @@ function buildUI() {
     addBrief(form, 'idea', '核心设定', null, '例如：经营午夜书店的失忆魔女，能从旧书读到顾客遗忘的记忆。', 5);
     const pairs = el('div', 'cf-grid'); form.append(pairs);
     addBrief(pairs, 'name', '角色名称', null, '留空，让模型取名');
-    addBrief(pairs, 'genre', '题材', ['自由创作', '现代日常', '奇幻冒险', '古风武侠', '仙侠修真', '科幻未来', '悬疑推理', '末日生存', '恋爱互动', '经营养成']);
+    addBrief(pairs, 'genre', '题材', GENRES);
     addBrief(pairs, 'language', '语言', ['简体中文', '繁體中文', 'English', '日本語']);
     addBrief(pairs, 'style', '叙述风格', ['细腻沉浸', '轻松幽默', '简洁直接', '文学叙事', '戏剧张力']);
-    addBrief(pairs, 'detail', '内容篇幅', ['精简', '标准', '详细']);
+    addBrief(pairs, 'detail', '内容篇幅', ['精简', '标准', '详细', '深度']);
     addBrief(pairs, 'persona', '玩家人设参考', [['none', '不引用玩家人设'], ['current', '引用当前玩家人设']]);
     addBrief(form, 'relationship', '与玩家的关系', null, '初次见面 / 旧友 / 委托人与向导…');
     addBrief(form, 'requirements', '额外要求', null, '外貌、背景、互动方式、希望避开的设定…', 3);
+    const detailHeading = el('div', 'cf-detail-heading');
+    detailHeading.append(el('div', 'cf-eyebrow', 'CHARACTER DETAILS'), el('h3', '', '把角色写得更具体'));
+    const detailCounter = el('span', 'cf-tag'); detailCounter.id = 'cf-detail-total'; detailHeading.append(detailCounter);
+    form.append(detailHeading, el('p', 'cf-hint cf-detail-intro', '以下细节全部可选。填写的内容会参与生成和字段重写；留空可交给模型发挥。性别可保持不指定。'));
+    const detailActions = el('div', 'cf-detail-actions');
+    detailActions.append(action('展开全部', () => $$('[data-detail-section]').forEach(node => { node.open = true; }), 'cf-button cf-small'));
+    detailActions.append(action('收起全部', () => $$('[data-detail-section]').forEach(node => { node.open = false; }), 'cf-button cf-small'));
+    detailActions.append(action('清空细节', () => confirmInline('清空这 35 项创作细节？已生成的角色卡、核心设定和数量选项保留。', () => {
+        for (const section of DETAIL_SECTIONS) for (const field of section.fields) $(`[data-brief="${field.key}"]`).value = '';
+        updateDetailCounts(); persist(); status('已清空创作细节。');
+    }), 'cf-button cf-small'));
+    form.append(detailActions);
+    for (const section of DETAIL_SECTIONS) {
+        const group = el('details', 'cf-detail-group'); group.dataset.detailSection = section.id;
+        const summary = el('summary'); const badge = el('span', 'cf-tag'); badge.dataset.detailCount = section.id;
+        summary.append(el('span', '', section.title), badge); group.append(summary, el('p', 'cf-hint', section.hint));
+        const controls = el('div', 'cf-grid cf-detail-grid');
+        for (const field of section.fields) addBrief(controls, field.key, field.label, field.options || null, field.placeholder || '', field.rows || 1);
+        group.append(controls); form.append(group);
+    }
     const world = el('label', 'cf-checkbox'); const checkbox = el('input'); checkbox.type = 'checkbox'; checkbox.dataset.brief = 'worldbook'; checkbox.addEventListener('change', scheduleSave);
-    world.append(checkbox, el('span', '', '同时生成内嵌世界书（3–5 条）')); form.append(world);
+    world.append(checkbox, el('span', '', '同时生成内嵌世界书')); form.append(world);
     const aside = el('aside', 'cf-aside'); grid.append(aside);
     const connection = el('div', 'cf-surface'); connection.append(el('div', 'cf-eyebrow', 'GENERATION'), el('h3', '', '使用酒馆当前模型'));
     const badge = el('p', 'cf-hint'); badge.id = 'cf-connection'; connection.append(badge);
     connection.append(el('p', 'cf-hint', '沿用当前连接和采样设置。使用独立的制卡提示，不附带当前聊天、角色卡或预设提示词。其他酒馆扩展可能修改请求。'));
     const length = addBrief(connection, 'responseLength', '最大输出 tokens', null); length.type = 'number'; length.min = '256'; length.max = '16384'; length.step = '256';
-    connection.append(el('p', 'cf-hint', '详细设定或世界书建议 4096–8192；实际上限取决于模型。生成会消耗当前 API 额度。'));
+    addBrief(connection, 'greetingCount', '备选开场白数量', [['0', '0 条（仅主开场）'], ['1', '1 条'], ['2', '2 条'], ['3', '3 条'], ['4', '4 条'], ['5', '5 条']]);
+    addBrief(connection, 'dialogueCount', '对话示例组数', [['1', '1 组'], ['2', '2 组'], ['3', '3 组'], ['4', '4 组'], ['5', '5 组'], ['6', '6 组']]);
+    addBrief(connection, 'worldbookCount', '世界书条目数', [['3', '3 条'], ['5', '5 条'], ['8', '8 条'], ['10', '10 条']]);
+    const outputPlan = el('p', 'cf-hint'); outputPlan.id = 'cf-output-plan'; connection.append(outputPlan);
+    connection.append(el('p', 'cf-hint', '详细或深度模式建议 8192 tokens；大量开场和世界书可按模型上限提高。数量越多，占用的输出空间越大。生成会消耗当前 API 额度。'));
     const generateButton = action('✦ 生成角色卡', () => requestGenerate(), 'cf-button cf-primary cf-full'); generateButton.id = 'cf-generate'; connection.append(generateButton);
     const discard = action('放弃本次结果', () => { discardGeneration = true; $('#cf-discard').disabled = true; status('将忽略本次结果。请求可能继续计费，等待返回后可再次生成。'); }, 'cf-button cf-full'); discard.id = 'cf-discard'; discard.hidden = true; connection.append(discard);
     aside.append(connection);
@@ -449,6 +490,11 @@ function buildUI() {
     if ([...persona.options].some(o => o.value === settings.brief?.persona)) persona.value = settings.brief.persona;
     try { loadCard(settings.card || emptyCard()); }
     catch { loadCard(emptyCard()); status('保存的草稿格式无法读取，已打开空白角色卡。', true); }
+    updateDetailCounts(); syncGenerationOptions();
+    for (const section of DETAIL_SECTIONS) {
+        const filled = section.fields.some(f => $(`[data-brief="${f.key}"]`).value.trim());
+        $(`[data-detail-section="${section.id}"]`).open = section.id === 'identity' || filled;
+    }
     setTab('brief');
 }
 
