@@ -1,11 +1,14 @@
 import { VERSION, TEXT_FIELDS, DEFAULT_BRIEF, DETAIL_SECTIONS, GENRES, generationOptions, emptyCard, normalizeCard, normalizeBook, parseModelJson, validateCard, buildPrompt, fileName } from './core.js';
 import { embedCard, extractCard } from './png.js';
+import { FRONTEND_KEY, FRONTEND_MODULES, FRONTEND_THEMES, normalizeFrontend, starterFrontend, buildFrontendPrompt, stripFrontendSnapshot, attachFrontend, detachFrontend, renderFrontend, frontendSnapshot, frontendDocument } from './frontend.js';
+import { installFrontendRuntime } from './frontend-runtime.js';
 
 const KEY = 'st_card_forge';
 const MAX_FILE = 20 * 1024 * 1024;
 let dialog, root, settings, card = emptyCard(), avatarData = '', rawOutput = '', activeTab = 'brief';
 let busy = false, discardGeneration = false, chatBusy = false, lastFocus, saveTimer;
 let importReceipt = '';
+let frontendDraft = null;
 const context = () => globalThis.SillyTavern?.getContext?.();
 const $ = selector => root.querySelector(selector);
 const $$ = selector => [...root.querySelectorAll(selector)];
@@ -36,6 +39,10 @@ function persist() {
     clearTimeout(saveTimer);
     settings.brief = getBrief();
     settings.card = structuredClone(card);
+    if ($('#cf-front-theme')) {
+        settings.frontendOptions = readFrontendOptions();
+        settings.frontendDraft = frontendDraft;
+    }
     context()?.saveSettingsDebounced?.();
 }
 function scheduleSave() {
@@ -63,10 +70,17 @@ function syncGenerationOptions() {
     $('#cf-output-plan').textContent = `1 条主开场 · ${options.greetings} 条备选开场 · ${options.dialogues} 组对白${world.checked ? ` · ${options.worldEntries} 条世界书` : ''}`;
 }
 function loadCard(next) {
+    const previousFrontend = JSON.stringify(card.data.extensions?.[FRONTEND_KEY]);
     card = normalizeCard(next);
     for (const [key] of TEXT_FIELDS) $(`[data-field="${key}"]`).value = card.data[key];
     $('#cf-tags').value = card.data.tags.join(', ');
     $('#cf-book').value = card.data.character_book ? JSON.stringify(card.data.character_book, null, 2) : '';
+    if (previousFrontend !== JSON.stringify(card.data.extensions?.[FRONTEND_KEY])) {
+        try { frontendDraft = card.data.extensions?.[FRONTEND_KEY] ? normalizeFrontend(card.data.extensions[FRONTEND_KEY]) : null; }
+        catch { frontendDraft = null; }
+        renderFrontendDraft();
+    }
+    $('#cf-front-attached').textContent = card.data.extensions?.[FRONTEND_KEY] ? '当前角色卡已附带前端配置' : '当前角色卡尚未附带前端';
     renderGreetings(); renderPreview(); updateStats(); persist();
 }
 function updateStats() {
@@ -140,12 +154,14 @@ function confirmInline(message, onConfirm) {
 function setBusy(value, operation = 'generation') {
     busy = value;
     for (const node of $$('input, select, textarea, button')) {
-        if (node.id === 'cf-close' || node.id === 'cf-discard' || node.dataset.tab) continue;
+        if (node.id === 'cf-close' || node.id === 'cf-discard' || node.id === 'cf-front-discard' || node.dataset.tab) continue;
         node.disabled = value;
     }
     $('#cf-discard').hidden = !value || operation !== 'generation';
     $('#cf-discard').disabled = false;
-    $('#cf-generate').textContent = value ? operation === 'generation' ? '正在生成…' : '正在导入…' : '✦ 生成角色卡';
+    $('#cf-generate').textContent = value ? operation === 'import' ? '正在导入…' : '正在生成…' : '✦ 生成角色卡';
+    if ($('#cf-front-generate')) $('#cf-front-generate').textContent = value && operation === 'frontend' ? '正在生成前端…' : '✦ AI 生成前端';
+    if ($('#cf-front-discard')) { $('#cf-front-discard').hidden = !value || operation !== 'frontend'; $('#cf-front-discard').disabled = false; }
     root.setAttribute('aria-busy', String(value));
     syncGenerationOptions();
 }
@@ -219,11 +235,15 @@ function renderPreview() {
     const tags = el('div', 'cf-tags');
     for (const tag of card.data.tags) tags.append(el('span', 'cf-tag', tag));
     intro.append(tags); heading.append(intro); preview.append(heading);
+    if (card.data.extensions?.[FRONTEND_KEY]) {
+        try { preview.append(renderFrontend(card.data.extensions[FRONTEND_KEY], { onChoice: text => status(`预览行动：${text}`) })); }
+        catch { preview.append(el('p', 'cf-hint', '卡内前端配置暂时无法预览，可在前端页重新生成。')); }
+    }
     const fields = TEXT_FIELDS.filter(([key]) => !['name', 'creator', 'character_version'].includes(key));
     for (const [key, label] of fields) {
         if (!card.data[key]) continue;
         const section = el('section', 'cf-preview-section');
-        section.append(el('h3', '', label), el('p', 'cf-prose', card.data[key])); preview.append(section);
+        section.append(el('h3', '', label), el('p', 'cf-prose', key === 'first_mes' ? stripFrontendSnapshot(card.data[key]) : card.data[key])); preview.append(section);
     }
     card.data.alternate_greetings.forEach((text, i) => {
         const section = el('section', 'cf-preview-section');
@@ -249,6 +269,99 @@ function download(blob, name) {
     const url = URL.createObjectURL(blob), anchor = el('a');
     anchor.href = url; anchor.download = name; document.body.append(anchor); anchor.click(); anchor.remove();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+function readFrontendOptions() {
+    return {
+        theme: $('#cf-front-theme').value,
+        modules: $$('[data-front-module]').filter(input => input.checked).map(input => input.dataset.frontModule),
+        request: $('#cf-front-request').value,
+        showInGreeting: $('#cf-front-snapshot')?.checked ?? true,
+    };
+}
+function readFrontendEditor() {
+    return normalizeFrontend(parseModelJson($('#cf-front-json').value));
+}
+function renderFrontendDraft() {
+    const host = $('#cf-front-preview'); if (!host) return;
+    host.replaceChildren();
+    $('#cf-front-json').value = frontendDraft ? JSON.stringify(frontendDraft, null, 2) : '';
+    if (!frontendDraft) { host.append(el('p', 'cf-hint', '选择模块和主题后生成前端，或先创建基础模板。')); return; }
+    host.append(renderFrontend(frontendDraft, {
+        onChoice: text => { $('#cf-front-action').value = text; status('这是前端预览，行动尚未发送。'); },
+        onQuestChange: (index, value) => {
+            const next = readFrontendEditor();
+            if (!next.quests[index]) throw new Error('请先刷新 JSON 预览。');
+            next.quests[index].state = value; frontendDraft = next; renderFrontendDraft(); persist();
+        },
+    }));
+}
+async function generateFrontend() {
+    if (busy) return;
+    const ctx = context(), source = currentCard(), options = readFrontendOptions();
+    if (chatBusy || ctx.streamingProcessor && !ctx.streamingProcessor.isFinished) throw new Error('请等酒馆聊天生成结束后再生成前端。');
+    if (!options.modules.length) throw new Error('请至少选择一个前端模块。');
+    if (typeof ctx.generateRaw !== 'function' || !['openai', 'textgenerationwebui', 'kobold', 'koboldhorde', 'novel'].includes(ctx.mainApi)) throw new Error('请先连接酒馆的文本生成 API。');
+    const brief = getBrief();
+    if (!Number.isInteger(brief.responseLength) || brief.responseLength < 256 || brief.responseLength > 16384) throw new Error('请在创作页设置有效的最大输出 tokens（256–16384）。');
+    persist(); discardGeneration = false; $('#cf-front-raw').value = ''; setBusy(true, 'frontend'); status('正在为当前角色生成前端配置…');
+    try {
+        const raw = await ctx.generateRaw({ ...buildFrontendPrompt(source, options, brief), responseLength: brief.responseLength, trimNames: false });
+        if (discardGeneration) { status('已放弃本次前端结果，之前的草稿已保留。'); return; }
+        $('#cf-front-raw').value = typeof raw === 'string' ? raw : JSON.stringify(raw);
+        frontendDraft = normalizeFrontend(parseModelJson($('#cf-front-raw').value), options);
+        renderFrontendDraft(); persist(); status('前端已生成。检查预览后点击「写入角色卡」。');
+    } catch (error) {
+        status(discardGeneration ? '已放弃本次前端结果。' : `前端生成失败：${error.message || String(error)}。原有草稿保留；可查看本次原始输出。`, !discardGeneration);
+    } finally { setBusy(false); }
+}
+function buildFrontendUI() {
+    const panel = el('section', 'cf-panel'); panel.dataset.panel = 'frontend';
+    const layout = el('div', 'cf-front-layout'); panel.append(layout);
+    const controls = el('div', 'cf-surface'); controls.append(el('div', 'cf-eyebrow', 'FRONTEND BUILDER'), el('h3', '', '生成可互动的角色面板'));
+    controls.append(el('p', 'cf-hint', '先生成或填写角色卡，再用当前酒馆模型设计面板。也可免费创建基础模板。'));
+    const saved = settings.frontendOptions || {};
+    const themeLabel = el('label', 'cf-field'); themeLabel.append(el('span', 'cf-label', '面板主题'));
+    const theme = el('select', 'cf-input'); theme.id = 'cf-front-theme';
+    for (const [id, value] of Object.entries(FRONTEND_THEMES)) theme.add(new Option(value.label, id));
+    theme.value = Object.hasOwn(FRONTEND_THEMES, saved.theme) ? saved.theme : 'jade'; theme.addEventListener('change', scheduleSave); themeLabel.append(theme); controls.append(themeLabel);
+    const choices = el('fieldset', 'cf-front-modules'); choices.append(el('legend', 'cf-label', '生成模块'));
+    for (const [id, label] of FRONTEND_MODULES) {
+        const item = el('label', 'cf-checkbox'), input = el('input'); input.type = 'checkbox'; input.dataset.frontModule = id;
+        input.checked = Array.isArray(saved.modules) ? saved.modules.includes(id) : true; input.addEventListener('change', scheduleSave); item.append(input, el('span', '', label)); choices.append(item);
+    }
+    controls.append(choices);
+    const requestLabel = el('label', 'cf-field'); requestLabel.append(el('span', 'cf-label', '前端需求'));
+    const request = el('textarea', 'cf-input'); request.id = 'cf-front-request'; request.rows = 4; request.value = typeof saved.request === 'string' ? saved.request : '';
+    request.placeholder = '例如：适合魔法书店，显示专注、魔力、与旅人的关系，给出三个调查行动。'; request.addEventListener('input', scheduleSave); requestLabel.append(request); controls.append(requestLabel);
+    const generate = action('✦ AI 生成前端', generateFrontend, 'cf-button cf-primary cf-full'); generate.id = 'cf-front-generate'; controls.append(generate);
+    const discard = action('放弃本次前端结果', () => { discardGeneration = true; discard.disabled = true; status('将忽略本次前端结果。请求可能继续计费，请等待返回。'); }, 'cf-button cf-full'); discard.id = 'cf-front-discard'; discard.hidden = true; controls.append(discard);
+    controls.append(action('创建基础模板', () => { frontendDraft = starterFrontend(card.data.name || '角色界面', readFrontendOptions()); renderFrontendDraft(); persist(); status('基础模板已创建，可编辑后写入角色卡。'); }, 'cf-button cf-full'));
+    const snapshotLabel = el('label', 'cf-checkbox'); const snapshot = el('input'); snapshot.type = 'checkbox'; snapshot.checked = saved.showInGreeting !== false; snapshot.id = 'cf-front-snapshot'; snapshot.addEventListener('change', scheduleSave); snapshotLabel.append(snapshot, el('span', '', '在主开场附带可显示的面板')); controls.append(snapshotLabel);
+    const attached = el('p', 'cf-hint'); attached.id = 'cf-front-attached'; controls.append(attached);
+    controls.append(action('写入角色卡', () => {
+        const next = readFrontendEditor(), source = currentCard();
+        confirmInline('将前端配置写入当前角色卡草稿？之后可导出或导入酒馆。', () => {
+            frontendDraft = next;
+            loadCard(attachFrontend(source, next, snapshot.checked ? frontendSnapshot(next) : ''));
+            status('前端已写入角色卡草稿。请导出或导入酒馆以保存角色。');
+        });
+    }, 'cf-button cf-primary cf-full'));
+    controls.append(action('导出独立 HTML', () => {
+        const spec = readFrontendEditor(); download(new Blob([frontendDocument(spec)], { type: 'text/html;charset=utf-8' }), `${fileName(spec.title)}-frontend.html`); status('独立 HTML 已导出，可在浏览器打开。');
+    }, 'cf-button cf-full'));
+    controls.append(action('移除卡内前端', () => confirmInline('移除本工坊附带的前端配置和开场面板？角色文字保留。', () => { loadCard(detachFrontend(card)); status('已移除卡内前端。'); }), 'cf-button cf-full'));
+    controls.append(el('p', 'cf-hint', '属性和关系是开场参考，不会自动计算。任务可在单角色聊天中手动勾选。行动按钮只填入输入框，发送由你确认。酒馆互动需要启用本扩展。'));
+    layout.append(controls);
+    const work = el('div'); const preview = el('div'); preview.id = 'cf-front-preview'; work.append(preview);
+    const outputLabel = el('label', 'cf-field'); outputLabel.append(el('span', 'cf-label', '预览中选中的行动'));
+    const output = el('textarea', 'cf-input'); output.id = 'cf-front-action'; output.rows = 2; output.readOnly = true; outputLabel.append(output); work.append(outputLabel);
+    const editor = el('details', 'cf-surface'); editor.append(el('summary', '', '编辑前端配置 JSON'));
+    const json = el('textarea', 'cf-input cf-code'); json.id = 'cf-front-json'; json.rows = 16; json.setAttribute('aria-label', '前端配置 JSON'); editor.append(json);
+    editor.append(action('刷新前端预览', () => { frontendDraft = readFrontendEditor(); renderFrontendDraft(); persist(); status('前端预览已更新，写入角色卡后才会随卡导出。'); })); work.append(editor);
+    const rawBox = el('details', 'cf-surface'); rawBox.append(el('summary', '', '本次前端原始输出'));
+    const raw = el('textarea', 'cf-input cf-code'); raw.id = 'cf-front-raw'; raw.rows = 10; raw.setAttribute('aria-label', '前端原始输出'); rawBox.append(raw);
+    rawBox.append(action('解析前端原始输出', () => { frontendDraft = normalizeFrontend(parseModelJson(raw.value)); renderFrontendDraft(); persist(); status('前端配置已解析，请检查预览。'); })); work.append(rawBox);
+    layout.append(work); return panel;
 }
 async function pngCard(next) {
     const canvas = document.createElement('canvas'); canvas.width = 600; canvas.height = 900;
@@ -344,6 +457,7 @@ async function openCardFile(file) {
 }
 
 function buildUI() {
+    const savedFrontendDraft = settings.frontendDraft;
     dialog = el('dialog', 'cf-dialog'); dialog.id = 'cf-dialog'; dialog.setAttribute('aria-labelledby', 'cf-title');
     root = el('div', 'cf-app'); dialog.append(root);
     const header = el('header', 'cf-header');
@@ -353,14 +467,14 @@ function buildUI() {
     const close = action('关闭', () => dialog.close(), 'cf-button cf-small'); close.id = 'cf-close';
     header.append(brand, close); root.append(header);
     const tabs = el('div', 'cf-tabs'); tabs.setAttribute('role', 'tablist'); tabs.setAttribute('aria-label', '角色卡工作区');
-    [['brief', '01 创作'], ['edit', '02 角色卡'], ['preview', '03 预览']].forEach(([id, text]) => {
+    [['brief', '01 创作'], ['edit', '02 角色卡'], ['preview', '03 预览'], ['frontend', '04 前端']].forEach(([id, text]) => {
         const button = action(text, () => setTab(id), 'cf-tab'); button.dataset.tab = id; button.id = `cf-tab-${id}`;
         button.setAttribute('role', 'tab'); button.setAttribute('aria-controls', `cf-panel-${id}`); tabs.append(button);
     });
     tabs.addEventListener('keydown', event => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault(); const buttons = [...tabs.children], index = buttons.indexOf(document.activeElement);
-        const next = event.key === 'Home' ? 0 : event.key === 'End' ? 2 : (index + (event.key === 'ArrowRight' ? 1 : 2)) % 3;
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowRight' ? 1 : buttons.length - 1)) % buttons.length;
         setTab(buttons[next].dataset.tab); buttons[next].focus();
     });
     root.append(tabs);
@@ -419,7 +533,7 @@ function buildUI() {
     input.addEventListener('change', () => { const file = input.files[0]; input.value = ''; openCardFile(file).catch(e => status(e.message, true)); });
     tools.append(input, action('载入 JSON / PNG 卡', () => input.click(), 'cf-button cf-full'));
     tools.append(action('新建空白角色卡', () => confirmInline('清空当前角色卡和头像？创作设定保留。', () => {
-        avatarData = ''; importReceipt = ''; rawOutput = ''; $('#cf-raw').value = '';
+        avatarData = ''; importReceipt = ''; rawOutput = ''; $('#cf-raw').value = ''; frontendDraft = null; renderFrontendDraft();
         $('#cf-avatar-state').textContent = '尚未选择头像 · 自动生成文字封面'; loadCard(emptyCard()); status('已新建空白角色卡。');
     }), 'cf-button cf-full'));
     tools.append(el('p', 'cf-hint', '自动保存一份文字草稿。头像仅在本次页面会话保留，刷新前请导出 PNG。')); aside.append(tools);
@@ -470,7 +584,8 @@ function buildUI() {
     });
     bookSection.append(bookInput); editor.append(bookSection); scroll.append(editor);
     const preview = el('section', 'cf-panel'); preview.dataset.panel = 'preview'; const previewCard = el('article', 'cf-preview'); previewCard.id = 'cf-preview'; preview.append(previewCard); scroll.append(preview);
-    for (const panel of [briefPanel, editor, preview]) {
+    const frontendPanel = buildFrontendUI(); scroll.append(frontendPanel);
+    for (const panel of [briefPanel, editor, preview, frontendPanel]) {
         panel.id = `cf-panel-${panel.dataset.panel}`; panel.setAttribute('role', 'tabpanel'); panel.setAttribute('aria-labelledby', `cf-tab-${panel.dataset.panel}`);
     }
     const confirm = el('div', 'cf-confirm'); confirm.id = 'cf-confirm'; confirm.hidden = true; confirm.setAttribute('role', 'group'); confirm.setAttribute('aria-label', '确认操作'); root.append(confirm);
@@ -490,6 +605,10 @@ function buildUI() {
     if ([...persona.options].some(o => o.value === settings.brief?.persona)) persona.value = settings.brief.persona;
     try { loadCard(settings.card || emptyCard()); }
     catch { loadCard(emptyCard()); status('保存的草稿格式无法读取，已打开空白角色卡。', true); }
+    if (savedFrontendDraft) {
+        try { frontendDraft = normalizeFrontend(savedFrontendDraft); } catch { /* Preserve a valid attached frontend instead. */ }
+    }
+    renderFrontendDraft(); persist();
     updateDetailCounts(); syncGenerationOptions();
     for (const section of DETAIL_SECTIONS) {
         const filled = section.fields.some(f => $(`[data-brief="${f.key}"]`).value.trim());
@@ -520,6 +639,7 @@ function initialize() {
         if (ctx.eventTypes?.GENERATION_STARTED) ctx.eventSource.on(ctx.eventTypes.GENERATION_STARTED, (_type, _options, dryRun) => { if (!dryRun) chatBusy = true; });
         for (const type of [ctx.eventTypes?.GENERATION_ENDED, ctx.eventTypes?.GENERATION_STOPPED].filter(Boolean)) ctx.eventSource.on(type, () => { chatBusy = false; });
     }
+    installFrontendRuntime(context);
     return true;
 }
 // Support both deferred script loading and user-scoped extension mounts.

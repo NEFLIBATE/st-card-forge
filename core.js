@@ -1,4 +1,4 @@
-export const VERSION = '1.1.0';
+export const VERSION = '1.2.0';
 export const GENRES = ['自由创作', '现代日常', '都市异能', '校园青春', '职场生活', '娱乐圈', '悬疑推理', '侦探犯罪', '心理惊悚', '民俗志怪', '奇幻冒险', '西幻史诗', '黑暗奇幻', '童话寓言', '古风武侠', '仙侠修真', '历史架空', '宫廷权谋', '江湖市井', '科幻未来', '赛博朋克', '太空歌剧', '星际探索', '蒸汽朋克', '废土求生', '末日生存', '无限流', '克苏鲁神秘', '恋爱互动', '治愈陪伴', '经营养成', '田园生活', '航海冒险', '超级英雄', '运动竞技', '自定义（在核心设定中说明）'];
 // The same schema drives the form, saved brief defaults and prompt routing.
 export const DETAIL_SECTIONS = [
@@ -85,7 +85,7 @@ const copy = x => JSON.parse(JSON.stringify(x));
 
 // generateRaw runs SillyTavern's macro substitution over each prompt. Encode complete
 // macro expressions before sending; restore only generated JSON string values.
-function protectMacros(text) {
+export function protectMacros(text) {
     return text.replace(/\{\{([\s\S]*?)\}\}/g, (_, body) => `⟦CF_OPEN⟧${body}⟦CF_CLOSE⟧`);
 }
 function restoreMacros(value) {
