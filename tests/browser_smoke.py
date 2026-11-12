@@ -83,11 +83,29 @@ def main():
         page.get_by_role('button', name='打开角色卡工坊').click()
         expect(page.locator('#cf-dialog')).to_be_visible()
         page.locator('[data-brief="idea"]').fill('午夜书店的失忆魔女')
+        # Optional detail groups feed actual generation requests and preserve old drafts.
+        expect(page.locator('[data-brief="gender"]')).to_have_value('')
+        expect(page.locator('[data-brief="worldbookCount"]')).to_be_disabled()
+        page.get_by_text('外貌与感官', exact=True).click()
+        page.locator('[data-brief="appearance"]').fill('银灰短发，左手常戴一只旧皮手套。')
+        page.get_by_text('经历与世界', exact=True).click()
+        page.locator('[data-brief="goals"]').fill('找回自己的真名，但不愿以顾客的记忆交换。')
+        page.locator('[data-brief="detail"]').select_option('深度')
+        page.locator('[data-brief="greetingCount"]').select_option('3')
+        page.locator('[data-brief="dialogueCount"]').select_option('5')
+        expect(page.locator('#cf-detail-total')).to_have_text('已填写 2 / 35 项细节')
         page.locator('[data-brief="persona"]').select_option('saved:traveler.png')
         page.locator('[data-brief="worldbook"]').check()
+        expect(page.locator('[data-brief="worldbookCount"]')).to_be_enabled()
+        page.locator('[data-brief="worldbookCount"]').select_option('8')
+        expect(page.locator('#cf-output-plan')).to_contain_text('8 条世界书')
         page.locator('#cf-generate').click()
         expect(page.locator('[data-field="name"]')).to_have_value('雾灯 · 书店')
         assert '来自北方' in page.evaluate('requests[0].prompt')
+        prompt = page.evaluate('requests[0].prompt')
+        assert '银灰短发' in prompt and '找回自己的真名' in prompt
+        assert '恰好 3 条 alternate_greetings' in prompt and '恰好 8 条' in prompt
+        assert '5 组不同情境' in prompt
         assert page.evaluate('requests[0].responseLength') == 4096
         expect(page.locator('#cf-completeness')).to_have_text('6/6 核心字段')
         page.locator('[data-tab="preview"]').click()
@@ -163,6 +181,9 @@ def main():
         expect(page.locator('#cf-dialog')).not_to_be_visible()
         page.reload()
         page.get_by_role('button', name='打开角色卡工坊').click()
+        expect(page.locator('[data-brief="appearance"]')).to_have_value('银灰短发，左手常戴一只旧皮手套。')
+        expect(page.locator('[data-brief="greetingCount"]')).to_have_value('3')
+        expect(page.locator('#cf-detail-total')).to_have_text('已填写 2 / 35 项细节')
         page.locator('[data-tab="edit"]').click()
         expect(page.locator('[data-field="name"]')).to_have_value('雾灯二号')
         # A valid V2 PNG reload restores its content and image without unsafe HTML.
@@ -183,6 +204,18 @@ def main():
             assert page.evaluate('document.querySelector(".cf-scroll").scrollWidth <= document.querySelector(".cf-scroll").clientWidth + 1')
             box = page.get_by_role('button', name='导入酒馆', exact=True).bounding_box()
             assert box['y'] + box['height'] <= 844
+        page.locator('[data-tab="brief"]').click()
+        page.get_by_role('button', name='展开全部', exact=True).click()
+        assert page.locator('[data-detail-section][open]').count() == 6
+        assert page.evaluate('document.querySelector(".cf-scroll").scrollWidth <= document.querySelector(".cf-scroll").clientWidth + 1')
+        page.get_by_role('button', name='清空细节', exact=True).click()
+        page.locator('#cf-confirm').get_by_role('button', name='确认', exact=True).click()
+        expect(page.locator('#cf-detail-total')).to_have_text('已填写 0 / 35 项细节')
+        expect(page.locator('[data-field="name"]')).to_have_value('雾灯 · 书店')
+        expect(page.locator('[data-brief="idea"]')).to_have_value('午夜书店的失忆魔女')
+        expect(page.locator('[data-brief="greetingCount"]')).to_have_value('3')
+        page.get_by_role('button', name='收起全部', exact=True).click()
+        assert page.locator('[data-detail-section][open]').count() == 0
         page.keyboard.press('Escape')
         expect(page.locator('#cf-dialog')).not_to_be_visible()
         assert not errors, errors
